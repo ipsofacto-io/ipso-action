@@ -1,5 +1,7 @@
 # ipso-action
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ipsofacto-io/ipso-action/badge)](https://scorecard.dev/viewer/?uri=github.com/ipsofacto-io/ipso-action)
+
 GitHub Action that runs ipso decision checks in CI and uploads SARIF results.
 
 > Status: skeleton. The composite action lands in a later change, once a released CLI exists to download.
