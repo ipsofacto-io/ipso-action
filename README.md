@@ -4,7 +4,7 @@
 
 GitHub Action that runs ipso decision checks in CI, uploads SARIF to code scanning, and keeps the evidence as a workflow artifact.
 
-> Status: the action works and is tested on every pull request. It installs ipso v0.3.0 by default, the first release with `--sarif`, and that release is not out yet. Until it is, set `cli-path` to an ipso binary you built. The Marketplace listing follows that release.
+> Status: the action works and is tested on every pull request. It installs and verifies ipso v0.3.0 by default. It is not on GitHub Marketplace yet, so pin a commit SHA of this repository.
 
 ## Usage
 
