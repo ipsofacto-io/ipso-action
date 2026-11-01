@@ -49,7 +49,7 @@ On a pull request the decisions come from the pull request's own checkout, so it
 
 | Input | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | Yes | | The engine check: `plan`, `ci`, `checkov`, `depcruise`, `semgrep`, `archunit`, `importlinter`, `kyverno`, `gatekeeper`, or `eslint` |
+| `command` | Yes | | The engine check: `plan`, `ci`, `checkov`, `pulumi`, `cloudformation`, `arm`, `depcruise`, `semgrep`, `archunit`, `importlinter`, `kyverno`, `gatekeeper`, or `eslint` |
 | `args` | No | | Arguments of that check. They are split on whitespace and no shell expands them, so a path cannot hold a space. `--report`, `--sarif`, `--env`, and `--input` are refused here |
 | `env` | No | | Passed as `--env` |
 | `input` | No | | Passed as `--input`. `ci` does not take it |
@@ -82,7 +82,7 @@ The job needs `contents: read` and `security-events: write`. A pull request from
 
 ## Runner requirements
 
-Linux or macOS, on X64 or ARM64, with `bash`, `curl`, and the `gh` CLI. GitHub-hosted runners have all of them. The action does not install engines: `plan`, `ci`, and `checkov` need nothing more, and the other commands need their pinned engine on `PATH`, as the [ipso README](https://github.com/ipsofacto-io/ipso#commands) describes.
+Linux or macOS, on X64 or ARM64, with `bash`, `curl`, and the `gh` CLI. GitHub-hosted runners have all of them. The action does not install engines: `plan`, `ci`, `checkov`, `pulumi`, `cloudformation`, and `arm` need nothing more, and the other commands need their pinned engine on `PATH`, as the [ipso README](https://github.com/ipsofacto-io/ipso#commands) describes.
 
 ## How the CLI is verified
 

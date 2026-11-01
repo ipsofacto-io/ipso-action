@@ -14,8 +14,8 @@ fail() {
 [[ -x "${IPSO_BIN}" ]] || fail "the ipso binary is missing or not executable"
 
 case "${IPSO_COMMAND}" in
-  plan | ci | checkov | depcruise | semgrep | archunit | importlinter | kyverno | gatekeeper | eslint) ;;
-  *) fail "command must be plan, ci, checkov, depcruise, semgrep, archunit, importlinter, kyverno, gatekeeper, or eslint" ;;
+  plan | ci | checkov | pulumi | cloudformation | arm | depcruise | semgrep | archunit | importlinter | kyverno | gatekeeper | eslint) ;;
+  *) fail "command must be plan, ci, checkov, pulumi, cloudformation, arm, depcruise, semgrep, archunit, importlinter, kyverno, gatekeeper, or eslint" ;;
 esac
 
 args=()
