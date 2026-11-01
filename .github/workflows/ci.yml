@@ -45,8 +45,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     env:
-      # A published release, so the attestation path runs against real assets.
-      IPSO_VERSION: "0.2.0"
+      # The release the action defaults to, so the attestation path runs against real assets.
+      IPSO_VERSION: "0.3.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,6 +74,26 @@ jobs:
             exit 1
           fi
           test ! -s "${output}"
+      - name: Lay the sample repository over the workspace
+        run: cp -R tests/fixture/. .
+      - name: Run a check with a binary already on the runner
+        id: check
+        uses: ./
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          cli-path: ${{ steps.install.outputs.path }}
+      - name: Check the run
+        env:
+          EXIT_CODE: ${{ steps.check.outputs.exit-code }}
+          SARIF: ${{ steps.check.outputs.sarif }}
+          REPORT: ${{ steps.check.outputs.report }}
+        run: |
+          set -euo pipefail
+          test "${EXIT_CODE}" = "0"
+          test "$(jq -r '.runs[0].automationDetails.id' "${SARIF}")" = "ipso/plan/"
+          test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
 
   self-test:
     name: ci / self-test
@@ -86,17 +106,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.1"
-          cache: false
-      # The action needs --sarif, which no release has yet. This is the ipso main commit that has it.
-      - name: Build ipso
-        id: cli
-        run: |
-          set -euo pipefail
-          go install github.com/ipsofacto-io/ipso/cmd/ipso@d82d92f623d8e59f92c01ccf381b78ddd77bcceb
-          echo "path=$(go env GOPATH)/bin/ipso" >> "$GITHUB_OUTPUT"
       - name: Lay the sample repository over the workspace
         run: cp -R tests/fixture/. .
 
@@ -106,7 +115,6 @@ jobs:
         with:
           command: plan
           args: plans/private.json
-          cli-path: ${{ steps.cli.outputs.path }}
       - name: Check the passing run
         env:
           EXIT_CODE: ${{ steps.pass.outputs.exit-code }}
@@ -118,6 +126,8 @@ jobs:
           test "$(jq -r '.runs[0].automationDetails.id' "${SARIF}")" = "ipso/plan/"
           test "$(jq '.runs[0].results | length' "${SARIF}")" = "0"
           test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
+          # The action installed the release it defaults to.
+          test "$(jq -r '.ipso_version' "${REPORT}")" = "0.3.0"
 
       - name: Run a failing check
         id: failing
@@ -128,7 +138,6 @@ jobs:
           args: plans/public.json
           input: violating
           upload-sarif: "false"
-          cli-path: ${{ steps.cli.outputs.path }}
       - name: Check the failing run
         env:
           OUTCOME: ${{ steps.failing.outcome }}
@@ -168,7 +177,6 @@ jobs:
         with:
           command: plan
           args: "$(touch pwned) `touch pwned`"
-          cli-path: ${{ steps.cli.outputs.path }}
       - name: Check that nothing ran
         env:
           OUTCOME: ${{ steps.substitution.outcome }}
@@ -184,7 +192,6 @@ jobs:
         with:
           command: plan
           args: plans/private.json --sarif elsewhere.sarif
-          cli-path: ${{ steps.cli.outputs.path }}
       - name: Check that the flag was refused
         env:
           OUTCOME: ${{ steps.owned.outcome }}
@@ -201,7 +208,6 @@ jobs:
         uses: ./
         with:
           command: "plan; touch pwned"
-          cli-path: ${{ steps.cli.outputs.path }}
       - name: Check that the command was refused
         env:
           OUTCOME: ${{ steps.unknown.outcome }}
