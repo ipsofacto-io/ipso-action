@@ -1,0 +1,104 @@
+name: ipso decision check
+description: Run an ipso decision check, upload its SARIF to code scanning, and keep its evidence as an artifact.
+author: ipsofacto-io
+
+branding:
+  icon: check-square
+  color: gray-dark
+
+inputs:
+  command:
+    description: The engine check to run. One of plan, ci, checkov, depcruise, semgrep, archunit, importlinter, kyverno, gatekeeper, or eslint.
+    required: true
+  args:
+    description: Arguments of that check, such as the plan file. They are split on whitespace and no shell expands them.
+    required: false
+    default: ""
+  env:
+    description: Environment name, passed as --env. It also names the SARIF category.
+    required: false
+    default: ""
+  input:
+    description: Input name, passed as --input. It also names the SARIF category.
+    required: false
+    default: ""
+  version:
+    description: The ipso release to install, without the leading v.
+    required: false
+    default: "0.3.0"
+  cli-path:
+    description: Path of an ipso binary already on the runner. The action then installs nothing.
+    required: false
+    default: ""
+  upload-sarif:
+    description: Upload the SARIF file to code scanning. Set it to false for a private repository without code scanning.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: Exit code of the check.
+    value: ${{ steps.check.outputs.exit-code }}
+  sarif:
+    description: Path of the SARIF file. Empty when the check did not write one.
+    value: ${{ steps.check.outputs.sarif }}
+  report:
+    description: Path of the verdict report. Empty when the check did not write one.
+    value: ${{ steps.check.outputs.report }}
+  evidence-name:
+    description: Name of the evidence artifact. Empty when there was no evidence to upload.
+    value: ${{ steps.check.outputs.evidence-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install ipso
+      id: install
+      if: inputs.cli-path == ''
+      shell: bash
+      env:
+        IPSO_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/install.sh"
+
+    - name: Run the check
+      id: check
+      shell: bash
+      env:
+        IPSO_BIN: ${{ inputs.cli-path || steps.install.outputs.path }}
+        IPSO_COMMAND: ${{ inputs.command }}
+        IPSO_ARGS: ${{ inputs.args }}
+        IPSO_ENV: ${{ inputs.env }}
+        IPSO_INPUT: ${{ inputs.input }}
+        IPSO_JOB_INDEX: ${{ strategy.job-index }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/check.sh"
+
+    # A pull request from a fork gets a read-only token, so it cannot upload. It keeps the artifact.
+    - name: Upload the SARIF file
+      if: >-
+        always() && steps.check.outputs.sarif != '' && inputs.upload-sarif == 'true' &&
+        (github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      with:
+        sarif_file: ${{ steps.check.outputs.sarif }}
+
+    - name: Upload the evidence
+      if: always() && steps.check.outputs.evidence-name != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.check.outputs.evidence-name }}
+        path: ${{ steps.check.outputs.evidence-dir }}
+        if-no-files-found: error
+
+    # The check step always exits 0 so the uploads above run. This step reports its result,
+    # and an empty exit code means the check step itself broke, which also fails.
+    - name: Report the result
+      if: always()
+      shell: bash
+      env:
+        IPSO_EXIT_CODE: ${{ steps.check.outputs.exit-code }}
+      run: |
+        if [[ "${IPSO_EXIT_CODE}" != "0" ]]; then
+          echo "::error::ipso did not pass, exit code ${IPSO_EXIT_CODE:-unknown}"
+          exit 1
+        fi

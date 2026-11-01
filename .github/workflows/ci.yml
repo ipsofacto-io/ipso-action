@@ -1,0 +1,213 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ci / lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version="1.7.12"
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          checksum="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          tmp="${RUNNER_TEMP}/actionlint-install"
+          mkdir -p "${tmp}"
+          curl -fsSL -o "${tmp}/${archive}" "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          echo "${checksum}  ${tmp}/${archive}" | sha256sum -c -
+          tar -xzf "${tmp}/${archive}" -C "${tmp}" actionlint
+          echo "${tmp}" >> "$GITHUB_PATH"
+      - run: actionlint
+      - run: shellcheck scripts/*.sh
+
+  install:
+    name: ci / install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    env:
+      # A published release, so the attestation path runs against real assets.
+      IPSO_VERSION: "0.2.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install a published release
+        id: install
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/install.sh
+      - name: Run it
+        env:
+          IPSO_BIN: ${{ steps.install.outputs.path }}
+        run: |
+          set -euo pipefail
+          "${IPSO_BIN}" version | grep -F "ipso ${IPSO_VERSION} "
+      - name: Refuse an archive that fails verification
+        run: |
+          set -euo pipefail
+          stub="$(mktemp -d)"
+          printf '#!/bin/sh\nexit 1\n' > "${stub}/gh"
+          chmod 0755 "${stub}/gh"
+          output="$(mktemp)"
+          if PATH="${stub}:${PATH}" GITHUB_OUTPUT="${output}" bash scripts/install.sh; then
+            echo "install.sh accepted an archive that failed verification" >&2
+            exit 1
+          fi
+          test ! -s "${output}"
+
+  self-test:
+    name: ci / self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: false
+      # The action needs --sarif, which no release has yet. This is the ipso main commit that has it.
+      - name: Build ipso
+        id: cli
+        run: |
+          set -euo pipefail
+          go install github.com/ipsofacto-io/ipso/cmd/ipso@d82d92f623d8e59f92c01ccf381b78ddd77bcceb
+          echo "path=$(go env GOPATH)/bin/ipso" >> "$GITHUB_OUTPUT"
+      - name: Lay the sample repository over the workspace
+        run: cp -R tests/fixture/. .
+
+      - name: Run a passing check
+        id: pass
+        uses: ./
+        with:
+          command: plan
+          args: plans/private.json
+          cli-path: ${{ steps.cli.outputs.path }}
+      - name: Check the passing run
+        env:
+          EXIT_CODE: ${{ steps.pass.outputs.exit-code }}
+          SARIF: ${{ steps.pass.outputs.sarif }}
+          REPORT: ${{ steps.pass.outputs.report }}
+        run: |
+          set -euo pipefail
+          test "${EXIT_CODE}" = "0"
+          test "$(jq -r '.runs[0].automationDetails.id' "${SARIF}")" = "ipso/plan/"
+          test "$(jq '.runs[0].results | length' "${SARIF}")" = "0"
+          test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
+
+      - name: Run a failing check
+        id: failing
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          args: plans/public.json
+          input: violating
+          upload-sarif: "false"
+          cli-path: ${{ steps.cli.outputs.path }}
+      - name: Check the failing run
+        env:
+          OUTCOME: ${{ steps.failing.outcome }}
+          EXIT_CODE: ${{ steps.failing.outputs.exit-code }}
+          SARIF: ${{ steps.failing.outputs.sarif }}
+          REPORT: ${{ steps.failing.outputs.report }}
+        run: |
+          set -euo pipefail
+          test "${OUTCOME}" = "failure"
+          test "${EXIT_CODE}" = "1"
+          test "$(jq -r '.runs[0].automationDetails.id' "${SARIF}")" = "ipso/plan/-/violating/"
+          test "$(jq -r '.runs[0].results[0].level' "${SARIF}")" = "error"
+          test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "fail"
+          # ADR-0030 and ADR-0058 keep the plan's addresses in the runner log.
+          if grep -q aws_s3_bucket "${SARIF}" "${REPORT}"; then
+            echo "a resource address reached the evidence" >&2
+            exit 1
+          fi
+      - name: Download the evidence of the failing run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.failing.outputs.evidence-name }}
+          path: downloaded
+      - name: Compare the evidence with the files the check wrote
+        env:
+          SARIF: ${{ steps.failing.outputs.sarif }}
+          REPORT: ${{ steps.failing.outputs.report }}
+        run: |
+          set -euo pipefail
+          cmp "${SARIF}" downloaded/ipso.sarif
+          cmp "${REPORT}" downloaded/report.json
+
+      - name: Pass command substitution in args
+        id: substitution
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          args: "$(touch pwned) `touch pwned`"
+          cli-path: ${{ steps.cli.outputs.path }}
+      - name: Check that nothing ran
+        env:
+          OUTCOME: ${{ steps.substitution.outcome }}
+        run: |
+          set -euo pipefail
+          test "${OUTCOME}" = "failure"
+          test ! -e pwned
+
+      - name: Set a flag the action owns
+        id: owned
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          args: plans/private.json --sarif elsewhere.sarif
+          cli-path: ${{ steps.cli.outputs.path }}
+      - name: Check that the flag was refused
+        env:
+          OUTCOME: ${{ steps.owned.outcome }}
+          EXIT_CODE: ${{ steps.owned.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          test "${OUTCOME}" = "failure"
+          test -z "${EXIT_CODE}"
+          test ! -e elsewhere.sarif
+
+      - name: Run an unknown command
+        id: unknown
+        continue-on-error: true
+        uses: ./
+        with:
+          command: "plan; touch pwned"
+          cli-path: ${{ steps.cli.outputs.path }}
+      - name: Check that the command was refused
+        env:
+          OUTCOME: ${{ steps.unknown.outcome }}
+          EXIT_CODE: ${{ steps.unknown.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          test "${OUTCOME}" = "failure"
+          test -z "${EXIT_CODE}"
+          test ! -e pwned
