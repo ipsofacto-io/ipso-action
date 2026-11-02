@@ -25,7 +25,7 @@ inputs:
   version:
     description: The ipso release to install, without the leading v.
     required: false
-    default: "0.3.0"
+    default: "0.4.0"
   cli-path:
     description: Path of an ipso binary already on the runner. The action then installs nothing.
     required: false

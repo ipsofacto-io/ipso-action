@@ -46,7 +46,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     env:
       # The release the action defaults to, so the attestation path runs against real assets.
-      IPSO_VERSION: "0.3.0"
+      IPSO_VERSION: "0.4.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -127,7 +127,7 @@ jobs:
           test "$(jq '.runs[0].results | length' "${SARIF}")" = "0"
           test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
           # The action installed the release it defaults to.
-          test "$(jq -r '.ipso_version' "${REPORT}")" = "0.3.0"
+          test "$(jq -r '.ipso_version' "${REPORT}")" = "0.4.0"
 
       - name: Run a failing check
         id: failing
