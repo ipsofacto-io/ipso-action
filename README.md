@@ -4,7 +4,7 @@
 
 GitHub Action that runs ipso decision checks in CI, uploads SARIF to code scanning, and keeps the evidence as a workflow artifact.
 
-> Status: the action is tested on every pull request and listed on GitHub Marketplace from v0.1.0. It installs and verifies ipso v0.3.0 by default. Pin the full commit SHA of a release.
+> Status: the action is tested on every pull request and listed on GitHub Marketplace from v0.1.0. It installs and verifies ipso v0.4.0 by default. Pin the full commit SHA of a release.
 
 ## Usage
 
@@ -53,7 +53,7 @@ On a pull request the decisions come from the pull request's own checkout, so it
 | `args` | No | | Arguments of that check. They are split on whitespace and no shell expands them, so a path cannot hold a space. `--report`, `--sarif`, `--env`, and `--input` are refused here |
 | `env` | No | | Passed as `--env` |
 | `input` | No | | Passed as `--input`. `ci` does not take it |
-| `version` | No | `0.3.0` | The ipso release to install, without the leading `v` |
+| `version` | No | `0.4.0` | The ipso release to install, without the leading `v` |
 | `cli-path` | No | | Path of an ipso binary already on the runner. The action then installs and verifies nothing |
 | `upload-sarif` | No | `true` | Set it to `false` in a private repository without code scanning |
 
