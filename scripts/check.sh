@@ -6,6 +6,10 @@
 # command or GITHUB_OUTPUT except through the name filter below.
 set -euo pipefail
 
+# ipso and the engines run code that comes from the repository. The upload step is the only one
+# that asks for an OIDC token, so the means to ask never reach them (ADR-0105).
+unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+
 fail() {
   echo "::error::$1" >&2
   exit 2
