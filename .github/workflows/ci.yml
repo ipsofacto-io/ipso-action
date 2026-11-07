@@ -34,12 +34,16 @@ jobs:
           tar -xzf "${tmp}/${archive}" -C "${tmp}" actionlint
           echo "${tmp}" >> "$GITHUB_PATH"
       - run: actionlint
-      - run: shellcheck scripts/*.sh
+      - run: shellcheck scripts/*.sh tests/verdict-server/*.sh
 
   install:
     name: ci / install (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
+    # id-token: write lets the upload step ask GitHub for a token, for an audience no server accepts.
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +51,8 @@ jobs:
     env:
       # The release the action defaults to, so the attestation path runs against real assets.
       IPSO_VERSION: "0.4.0"
+      # A pull request from a fork gets no OIDC token, and the action skips the upload there.
+      CAN_MINT_TOKEN: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,14 +82,20 @@ jobs:
           test ! -s "${output}"
       - name: Lay the sample repository over the workspace
         run: cp -R tests/fixture/. .
+      - name: Start a stand-in for the control plane
+        run: bash tests/verdict-server/start.sh
       - name: Run a check with a binary already on the runner
         id: check
         uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
         with:
           command: plan
           args: plans/private.json
           upload-sarif: "false"
           cli-path: ${{ steps.install.outputs.path }}
+          server-url: https://127.0.0.1:8443
+          server-audience: https://ipso.example.test/ci
       - name: Check the run
         env:
           EXIT_CODE: ${{ steps.check.outputs.exit-code }}
@@ -94,6 +106,74 @@ jobs:
           test "${EXIT_CODE}" = "0"
           test "$(jq -r '.runs[0].automationDetails.id' "${SARIF}")" = "ipso/plan/"
           test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
+      - name: Check the upload
+        if: env.CAN_MINT_TOKEN == 'true'
+        env:
+          SARIF: ${{ steps.check.outputs.sarif }}
+          REPORT: ${{ steps.check.outputs.report }}
+          UPLOAD_ID: ${{ steps.check.outputs.upload-id }}
+        run: |
+          set -euo pipefail
+          requests="${VERDICT_SERVER_DIR}/requests.jsonl"
+          test "$(jq -s 'length' "${requests}")" = "1"
+          test "$(jq -sr '.[0].path' "${requests}")" = "/v1/verdicts"
+          test "$(jq -sr '.[0].status' "${requests}")" = "201"
+          test "$(jq -sr '.[0].answer.id' "${requests}")" = "${UPLOAD_ID}"
+          test "$(jq -sr '.[0].claims.aud' "${requests}")" = "https://ipso.example.test/ci"
+          test "$(jq -sr '.[0].claims.repository' "${requests}")" = "${GITHUB_REPOSITORY}"
+          test "$(jq -sr '.[0].body | keys | join(",")' "${requests}")" = "check,report,sarif_sha256"
+          test "$(jq -sr '.[0].body.check' "${requests}")" = "plan"
+          # Linux hashes with sha256sum and macOS with shasum, and this step uses shasum on both.
+          test "$(jq -sr '.[0].body.sarif_sha256' "${requests}")" = "$(shasum -a 256 "${SARIF}" | cut -d' ' -f1)"
+          test "$(jq -S . "${REPORT}")" = "$(jq -sS '.[0].body.report' "${requests}")"
+      - name: Wrap the binary to see what reaches it
+        id: probe
+        env:
+          IPSO_BIN: ${{ steps.install.outputs.path }}
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d "${RUNNER_TEMP}/probe.XXXXXX")"
+          cat >"${dir}/ipso" <<'WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo ran >>"${PROBE_LOG}"
+          for name in ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+            if [[ -n "${!name+x}" ]]; then echo "${name} is set" >>"${PROBE_LOG}"; fi
+          done
+          exec "${REAL_IPSO}" "$@"
+          WRAPPER
+          chmod 0755 "${dir}/ipso"
+          echo "path=${dir}/ipso" >>"${GITHUB_OUTPUT}"
+          echo "REAL_IPSO=${IPSO_BIN}" >>"${GITHUB_ENV}"
+      - name: Show that the wrapper sees the job's token variables
+        if: env.CAN_MINT_TOKEN == 'true'
+        env:
+          PROBE_LOG: ${{ runner.temp }}/probe-control.log
+          WRAPPED: ${{ steps.probe.outputs.path }}
+        run: |
+          set -euo pipefail
+          "${WRAPPED}" version >/dev/null
+          grep -Fx "ACTIONS_ID_TOKEN_REQUEST_URL is set" "${PROBE_LOG}"
+          grep -Fx "ACTIONS_ID_TOKEN_REQUEST_TOKEN is set" "${PROBE_LOG}"
+      - name: Run a check through the wrapper
+        uses: ./
+        env:
+          PROBE_LOG: ${{ runner.temp }}/probe.log
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          cli-path: ${{ steps.probe.outputs.path }}
+      - name: Check that the engines never saw the token variables
+        env:
+          PROBE_LOG: ${{ runner.temp }}/probe.log
+        run: |
+          set -euo pipefail
+          grep -Fxq ran "${PROBE_LOG}"
+          if grep -q "is set" "${PROBE_LOG}"; then
+            echo "ipso saw a variable that asks for an OIDC token" >&2
+            exit 1
+          fi
 
   self-test:
     name: ci / self-test
@@ -102,6 +182,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      id-token: write # the upload step asks GitHub for a token, for an audience no server accepts
+    env:
+      # A pull request from a fork gets no OIDC token, and the action skips the upload there.
+      CAN_MINT_TOKEN: ${{ github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,12 +193,19 @@ jobs:
       - name: Lay the sample repository over the workspace
         run: cp -R tests/fixture/. .
 
+      - name: Start a stand-in for the control plane
+        run: bash tests/verdict-server/start.sh
+
       - name: Run a passing check
         id: pass
         uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
         with:
           command: plan
           args: plans/private.json
+          server-url: https://127.0.0.1:8443
+          server-audience: https://ipso.example.test/ci
       - name: Check the passing run
         env:
           EXIT_CODE: ${{ steps.pass.outputs.exit-code }}
@@ -128,16 +219,44 @@ jobs:
           test "$(jq -r '.verdicts[0].result' "${REPORT}")" = "pass"
           # The action installed the release it defaults to.
           test "$(jq -r '.ipso_version' "${REPORT}")" = "0.4.0"
+      - name: Check the passing upload
+        if: env.CAN_MINT_TOKEN == 'true'
+        env:
+          SARIF: ${{ steps.pass.outputs.sarif }}
+          REPORT: ${{ steps.pass.outputs.report }}
+          UPLOAD_ID: ${{ steps.pass.outputs.upload-id }}
+        run: |
+          set -euo pipefail
+          requests="${VERDICT_SERVER_DIR}/requests.jsonl"
+          test "$(jq -s 'length' "${requests}")" = "1"
+          test "$(jq -sr '.[0].path' "${requests}")" = "/v1/verdicts"
+          test "$(jq -sr '.[0].status' "${requests}")" = "201"
+          test "$(jq -sr '.[0].content_type' "${requests}")" = "application/json"
+          test "$(jq -sr '.[0].answer.id' "${requests}")" = "${UPLOAD_ID}"
+          # The token is GitHub's: its audience is the input and its repository is this one.
+          test "$(jq -sr '.[0].claims.iss' "${requests}")" = "https://token.actions.githubusercontent.com"
+          test "$(jq -sr '.[0].claims.aud' "${requests}")" = "https://ipso.example.test/ci"
+          test "$(jq -sr '.[0].claims.repository' "${requests}")" = "${GITHUB_REPOSITORY}"
+          test "$(jq -sr '.[0].claims.run_id' "${requests}")" = "${GITHUB_RUN_ID}"
+          # The body has exactly the keys of ADR-0102, the report as the check wrote it, and the digest of the SARIF file.
+          test "$(jq -sr '.[0].body | keys | join(",")' "${requests}")" = "check,report,sarif_sha256"
+          test "$(jq -sr '.[0].body.check' "${requests}")" = "plan"
+          test "$(jq -sr '.[0].body.sarif_sha256' "${requests}")" = "$(sha256sum "${SARIF}" | cut -d' ' -f1)"
+          test "$(jq -S . "${REPORT}")" = "$(jq -sS '.[0].body.report' "${requests}")"
 
       - name: Run a failing check
         id: failing
         continue-on-error: true
         uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
         with:
           command: plan
           args: plans/public.json
           input: violating
           upload-sarif: "false"
+          server-url: https://127.0.0.1:8443
+          server-audience: https://ipso.example.test/ci
       - name: Check the failing run
         env:
           OUTCOME: ${{ steps.failing.outcome }}
@@ -154,6 +273,22 @@ jobs:
           # ADR-0030 and ADR-0058 keep the plan's addresses in the runner log.
           if grep -q aws_s3_bucket "${SARIF}" "${REPORT}"; then
             echo "a resource address reached the evidence" >&2
+            exit 1
+          fi
+      - name: Check the failing upload
+        if: env.CAN_MINT_TOKEN == 'true'
+        env:
+          UPLOAD_ID: ${{ steps.failing.outputs.upload-id }}
+        run: |
+          set -euo pipefail
+          requests="${VERDICT_SERVER_DIR}/requests.jsonl"
+          # The failed check uploaded too, and a resource address did not reach the server.
+          test "$(jq -s 'length' "${requests}")" = "2"
+          test "$(jq -sr '.[1].status' "${requests}")" = "201"
+          test "$(jq -sr '.[1].answer.id' "${requests}")" = "${UPLOAD_ID}"
+          test "$(jq -sr '.[1].body.report.verdicts[0].result' "${requests}")" = "fail"
+          if grep -q aws_s3_bucket "${requests}"; then
+            echo "a resource address reached the server" >&2
             exit 1
           fi
       - name: Download the evidence of the failing run
@@ -217,3 +352,100 @@ jobs:
           test "${OUTCOME}" = "failure"
           test -z "${EXIT_CODE}"
           test ! -e pwned
+
+      - name: Run a passing check against a server that is down
+        id: down
+        continue-on-error: true
+        uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          server-url: https://127.0.0.1:8443/down
+          server-audience: https://ipso.example.test/ci
+      - name: Check that the failed upload hid nothing
+        env:
+          OUTCOME: ${{ steps.down.outcome }}
+          EXIT_CODE: ${{ steps.down.outputs.exit-code }}
+          UPLOAD_ID: ${{ steps.down.outputs.upload-id }}
+        run: |
+          set -euo pipefail
+          test "${OUTCOME}" = "success"
+          test "${EXIT_CODE}" = "0"
+          test -z "${UPLOAD_ID}"
+      - name: Check that the upload was retried
+        if: env.CAN_MINT_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          requests="${VERDICT_SERVER_DIR}/requests.jsonl"
+          test "$(jq -s '[.[] | select(.path == "/down/v1/verdicts" and .status == 503)] | length' "${requests}")" -ge 2
+
+      - name: Name a server over http
+        id: plain
+        continue-on-error: true
+        uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          server-url: http://127.0.0.1:8443
+          server-audience: https://ipso.example.test/ci
+      - name: Name a server without an audience
+        id: no-audience
+        continue-on-error: true
+        uses: ./
+        env:
+          CURL_CA_BUNDLE: ${{ env.VERDICT_CA_BUNDLE }}
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          server-url: https://127.0.0.1:8443
+      - name: Name an audience without a server
+        id: no-server
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          args: plans/private.json
+          upload-sarif: "false"
+          server-audience: https://ipso.example.test/ci
+      - name: Check that each input error failed the action
+        env:
+          PLAIN: ${{ steps.plain.outcome }}
+          NO_AUDIENCE: ${{ steps.no-audience.outcome }}
+          NO_SERVER: ${{ steps.no-server.outcome }}
+          UPLOAD_IDS: ${{ steps.plain.outputs.upload-id }}${{ steps.no-audience.outputs.upload-id }}${{ steps.no-server.outputs.upload-id }}
+        run: |
+          set -euo pipefail
+          test "${PLAIN}" = "failure"
+          test "${NO_AUDIENCE}" = "failure"
+          test "${NO_SERVER}" = "failure"
+          test -z "${UPLOAD_IDS}"
+
+      - name: Upload from a job that has no OIDC token
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ""
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
+          IPSO_SERVER_URL: https://127.0.0.1:8443
+          IPSO_SERVER_AUDIENCE: https://ipso.example.test/ci
+          IPSO_COMMAND: plan
+          IPSO_REPORT: plans/private.json
+          IPSO_SARIF: ""
+        run: |
+          set -euo pipefail
+          output="$(bash scripts/upload.sh 2>&1)"
+          grep -F "::warning::" <<<"${output}" | grep -F "id-token: write"
+          test ! -s "${GITHUB_OUTPUT}"
+
+      - name: Check that only the steps that named a server called it
+        if: env.CAN_MINT_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          requests="${VERDICT_SERVER_DIR}/requests.jsonl"
+          test "$(jq -s '[.[] | select(.path == "/v1/verdicts")] | length' "${requests}")" = "2"
+          test "$(jq -s '[.[] | select(.path != "/v1/verdicts" and .path != "/down/v1/verdicts")] | length' "${requests}")" = "0"

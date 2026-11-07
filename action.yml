@@ -1,5 +1,5 @@
 name: ipso decision check
-description: Run an ipso decision check, upload its SARIF to code scanning, and keep its evidence as an artifact.
+description: Run an ipso decision check, upload its SARIF to code scanning, keep its evidence as an artifact, and optionally send its verdict report to an ipso control plane.
 author: ipsofacto-io
 
 branding:
@@ -34,6 +34,14 @@ inputs:
     description: Upload the SARIF file to code scanning. Set it to false for a private repository without code scanning.
     required: false
     default: "true"
+  server-url:
+    description: "Base URL of an ipso control plane, such as https://ipso.example.com. With server-audience, the action uploads the verdict report there, and the job needs the id-token: write permission. Leave both unset to upload nothing."
+    required: false
+    default: ""
+  server-audience:
+    description: The audience the control plane expects in the GitHub Actions token, which its operator sets as IPSO_CI_AUDIENCE. It is not derived from server-url.
+    required: false
+    default: ""
 
 outputs:
   exit-code:
@@ -48,6 +56,9 @@ outputs:
   evidence-name:
     description: Name of the evidence artifact. Empty when there was no evidence to upload.
     value: ${{ steps.check.outputs.evidence-name }}
+  upload-id:
+    description: Id the control plane gave the uploaded verdict report. Empty when nothing was uploaded.
+    value: ${{ steps.upload.outputs.upload-id }}
 
 runs:
   using: composite
@@ -89,6 +100,23 @@ runs:
         name: ${{ steps.check.outputs.evidence-name }}
         path: ${{ steps.check.outputs.evidence-dir }}
         if-no-files-found: error
+
+    # A pull request from a fork gets no OIDC token. A failed upload only warns, so the result below
+    # stays the result of the check, and the evidence artifact above still holds the report.
+    - name: Upload the verdict report
+      id: upload
+      if: >-
+        always() && (inputs.server-url != '' || inputs.server-audience != '') &&
+        steps.check.outputs.report != '' &&
+        (github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository)
+      shell: bash
+      env:
+        IPSO_SERVER_URL: ${{ inputs.server-url }}
+        IPSO_SERVER_AUDIENCE: ${{ inputs.server-audience }}
+        IPSO_COMMAND: ${{ inputs.command }}
+        IPSO_REPORT: ${{ steps.check.outputs.report }}
+        IPSO_SARIF: ${{ steps.check.outputs.sarif }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/upload.sh"
 
     # The check step always exits 0 so the uploads above run. This step reports its result,
     # and an empty exit code means the check step itself broke, which also fails.

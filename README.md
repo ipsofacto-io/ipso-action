@@ -2,7 +2,7 @@
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ipsofacto-io/ipso-action/badge)](https://scorecard.dev/viewer/?uri=github.com/ipsofacto-io/ipso-action)
 
-GitHub Action that runs ipso decision checks in CI, uploads SARIF to code scanning, and keeps the evidence as a workflow artifact.
+GitHub Action that runs ipso decision checks in CI, uploads SARIF to code scanning, keeps the evidence as a workflow artifact, and can send the verdict report to an ipso control plane.
 
 > Status: the action is tested on every pull request and listed on GitHub Marketplace from v0.1.0. It installs and verifies ipso v0.4.0 by default. Pin the full commit SHA of a release.
 
@@ -56,6 +56,8 @@ On a pull request the decisions come from the pull request's own checkout, so it
 | `version` | No | `0.4.0` | The ipso release to install, without the leading `v` |
 | `cli-path` | No | | Path of an ipso binary already on the runner. The action then installs and verifies nothing |
 | `upload-sarif` | No | `true` | Set it to `false` in a private repository without code scanning |
+| `server-url` | No | | Base URL of an ipso control plane, such as `https://ipso.example.com`. Set it with `server-audience` to upload the verdict report. See [Upload to an ipso control plane](#upload-to-an-ipso-control-plane) |
+| `server-audience` | No | | The audience the control plane expects in the GitHub token, which its operator sets as `IPSO_CI_AUDIENCE`. It is never derived from `server-url` |
 
 `env` and `input` name the SARIF category, so runs over different inputs do not close each other's alerts. Use one step per named run.
 
@@ -67,22 +69,51 @@ On a pull request the decisions come from the pull request's own checkout, so it
 | `sarif` | Path of the SARIF file, empty when none was written |
 | `report` | Path of the verdict report, empty when none was written |
 | `evidence-name` | Name of the evidence artifact, empty when there was nothing to upload |
+| `upload-id` | Id the control plane gave the uploaded report, empty when nothing was uploaded |
+
+## Upload to an ipso control plane
+
+Set `server-url` and `server-audience` to send the verdict report of each check to an ipso control plane, so a person sees the results per repository and decision without reading the workflow log. The operator of the control plane gives you both values. The job needs `id-token: write` in addition to its other permissions, and the action needs no secret.
+
+```yaml
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write # ask GitHub for a token the control plane accepts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ipsofacto-io/ipso-action@<commit-sha> # pin a full commit SHA
+        with:
+          command: plan
+          args: plan.json
+          server-url: https://ipso.example.com
+          server-audience: https://ipso.example.com/ci
+```
+
+The upload runs after the check and after the evidence uploads, also when the check failed. It sends the report that `ipso check --report` wrote, the name of the command, and the SHA-256 of the SARIF file. The tenant, repository, commit, and run come from the signed token that GitHub gives the job, never from the action.
+
+A failed upload only warns, and the result of the action stays the result of the check. That covers a job without `id-token: write`, a server that cannot be reached, and any answer other than 200 or 201. The server stores the same run, attempt, and content once, so the action retries a failed request a few times. A `server-url` that is not an `https` URL, and one input without the other, fail the action.
+
+The control plane has to know the repository: its GitHub App installation must be bound to a tenant, or the server answers 403. A pull request from a fork gets no token, so the action skips the upload there.
 
 ## What leaves the runner
 
 - The SARIF file goes to the code scanning of the same repository. The SARIF contract keeps plan values, resource addresses, and engine messages out of it.
 - The evidence artifact holds that SARIF file and the verdict report, which carries hashes and verdict counts. It stays in the same workflow run.
-- The action calls no ipso service and needs no secret. It reads the release archive and its attestation from GitHub.
+- With `server-url`, the verdict report, the name of the command, and the SHA-256 of the SARIF file go to that server, with a GitHub token for the audience you name. The report holds hashes and verdict counts and no plan value, resource address, or message. The SARIF file itself is not sent.
+- Without `server-url`, the action calls no ipso service and needs no secret. It reads the release archive and its attestation from GitHub.
 
 The runner log still prints resource addresses and engine messages, so read a public repository's log with that in mind.
 
 ## Permissions and pull requests from forks
 
-The job needs `contents: read` and `security-events: write`. A pull request from a fork gets a read-only token, so the action skips the code scanning upload there and keeps the artifact.
+The job needs `contents: read` and `security-events: write`, and `id-token: write` when it uploads to a control plane. A pull request from a fork gets a read-only token and no OIDC token, so the action skips both uploads there and keeps the artifact.
 
 ## Runner requirements
 
-Linux or macOS, on X64 or ARM64, with `bash`, `curl`, and the `gh` CLI. GitHub-hosted runners have all of them. The action does not install engines: `plan`, `ci`, `checkov`, `pulumi`, `cloudformation`, and `arm` need nothing more, and the other commands need their pinned engine on `PATH`, as the [ipso README](https://github.com/ipsofacto-io/ipso#commands) describes.
+Linux or macOS, on X64 or ARM64, with `bash`, `curl`, and the `gh` CLI, and with `jq` when it uploads to a control plane. GitHub-hosted runners have all of them. The action does not install engines: `plan`, `ci`, `checkov`, `pulumi`, `cloudformation`, and `arm` need nothing more, and the other commands need their pinned engine on `PATH`, as the [ipso README](https://github.com/ipsofacto-io/ipso#commands) describes.
 
 ## How the CLI is verified
 
