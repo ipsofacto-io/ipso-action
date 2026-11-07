@@ -435,8 +435,6 @@ jobs:
 
       - name: Upload from a job that has no OIDC token
         env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: ""
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ""
           IPSO_SERVER_URL: https://127.0.0.1:8443
           IPSO_SERVER_AUDIENCE: https://ipso.example.test/ci
           IPSO_COMMAND: plan
@@ -444,7 +442,8 @@ jobs:
           IPSO_SARIF: ""
         run: |
           set -euo pipefail
-          output="$(bash scripts/upload.sh 2>&1)"
+          # The job has the variables, and a step cannot blank them, so the script runs without them.
+          output="$(env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN bash scripts/upload.sh 2>&1)"
           grep -F "::warning::" <<<"${output}" | grep -F "id-token: write"
           test ! -s "${GITHUB_OUTPUT}"
 
